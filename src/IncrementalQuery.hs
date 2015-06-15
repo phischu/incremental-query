@@ -55,42 +55,23 @@ main = do
 --    print (runIncremental exampleQuery exampleEvent)
 
 
-exampleQuery :: Query () Row
-exampleQuery = joinColumn "LastName" (from "Person") (from "PhoneBook")
+createConference :: Text -> Event
+createConference conferenceName = Insert "Conferences" (row ["ConferenceName" .= conferenceName])
 
-exampleDatabase :: Database
-exampleDatabase = Map.fromList [
-    ("Person",personTable),
-    ("PhoneBook",phoneBookTable)]
+createTalk :: ConferenceName -> TalkName -> Seats -> Event
+createTalk = undefined
 
-exampleEvent :: Event
-exampleEvent = Insert "Person" lukas where
-    lukas = Map.fromList [
-        ("FirstName","Lukas"),
-        ("LastName","Haertel")]
+register :: ConferenceName -> AttendeeName -> Event
+register = undefined
 
-personTable :: Table
-personTable = Set.fromList [
-    johannes,philipp] where
-        johannes = Map.fromList [
-            ("FirstName","Johannes"),
-            ("LastName","Haertel")]
-        philipp = Map.fromList [
-            ("FirstName","Philipp"),
-            ("LastName","Schuster")]
+attend :: AttendeeName -> TalkName -> Event
+attend = undefined
 
-phoneBookTable :: Table
-phoneBookTable = Set.fromList [
-    lukasAddress,johannesAddress,philippAddress] where
-        lukasAddress = Map.fromList [
-            ("LastName","Haertel"),
-            ("Address","Hohenzollernstr."),
-            ("Number","01702835674")]
-        johannesAddress = Map.fromList [
-            ("LastName","Haertel"),
-            ("Address","Hohenzollernstr."),
-            ("Number","01519283343")]
-        philippAddress = Map.fromList [
-            ("LastName","Schuster"),
-            ("Address","Moselweisserstr."),
-            ("Number","015757237272")]
+
+registered :: ConferenceName -> Query AttendeeName
+registered = undefined
+
+attendings :: ConferenceName -> Query (TalkName,AttendeeName)
+attendings = undefined
+
+
