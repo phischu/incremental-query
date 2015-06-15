@@ -1,90 +1,52 @@
 {-# LANGUAGE GADTs #-}
 module IncrementalQuery where
 
-import Prelude hiding (filter)
 
 import Data.Set (Set)
-import Data.Set as Set
+import qualified Data.Set as Set
 import Data.Map (Map)
-import Data.Map as Map 
-import Data.Maybe (maybeToList)
+import qualified Data.Map as Map 
+import Data.Maybe (fromMaybe)
 import Data.Hashable (hash)
 import Control.Monad (guard)
 
-data Timestamp = Integer
-
-type TableName = String
-type ColumnName = String
-type Table = Set Row 
-type Row = Map ColumnName String
 
 type Database = Map TableName Table
+type TableName = String
+type Table = [Row]
+type ColumnName = String
+type Row = Map ColumnName String
 
 data Event = Insert TableName Row
 
 runEvent :: Event -> Database -> Database
 runEvent (Insert tableName row) database = Map.adjust (Set.insert row) tableName database
 
-data Query s a where
-    Constant :: s -> a -> Query s a
-    From :: s -> TableName -> Query s Row
-    Empty :: s -> Query s a
-    Project :: s -> (a -> b) -> Query s a -> Query s b
-    Join :: s -> (a -> Int) -> (b -> Int) -> Query s a -> Query s b -> Query s (a,b)
+data Query a where
+    Project :: (a -> b) -> Query a -> Query b
+    Restrict :: (a -> Bool) -> Query a -> Query a
+    Cross :: Query a -> Query b -> Query (a,b)
+    Table :: TableName -> Query Row
 
-queryState :: Query s a -> s
-queryState (Empty s) = s
-queryState (Constant s _) = s
-queryState (From s _) = s
-queryState (Project s _ _) = s
-queryState (Join s _ _ _ _) = s
+runQuery :: Database -> Query a -> Query a
+runQuery d (Project f q) = map f (runQuery d q)
+runQuery d (Restrict p q) = filter p (runQuery d q)
+runQuery d (Cross q r) = do
+    a <- runQuery d q
+    b <- runQuery d r
+    return (a,b)
+runQuery d (Table t) = fromMaybe [] (Map.lookup t d)
 
-constant :: a -> Query () a
-constant = Constant ()
+data Incremental a where
+    IncrementalProject :: (a -> b) -> Incremental a -> Incremental b
 
-from :: TableName -> Query () Row
-from = From ()
+incrementalize :: Query a -> Incremental a
+incrementalize (Project f q) = IncrementalProject f (incrementalize q)
 
-filter :: (a -> Bool) -> Query s a -> Query s a
-filter predicate = undefined
+data Diff a = Diff [a] deriving (Eq,Ord,Show)
 
-joinColumn :: ColumnName -> Query () Row -> Query () Row -> Query () Row
-joinColumn columnName left right = Project () (uncurry Map.union)
-    (Join () hashColumn hashColumn left right) where
-        hashColumn = hash . (Map.lookup columnName)
-
-runQuery :: Query s a -> Database -> Query [a] a
-runQuery Empty _ = []
-runQuery (Constant a) _ = [a]
-runQuery (From _ tableName) database = maybe [] Set.toList (Map.lookup tableName database)
-runQuery (Project _ function query) database = Prelude.map function (runQuery query database)
-runQuery (Join _ leftHash rightHash left right) database = do
-    leftRow <- runQuery left database
-    rightRow <- runQuery right database
-    guard (leftHash leftRow == rightHash rightRow)
-    return (leftRow,rightRow)
-
-unify :: Row -> Row -> Maybe Row
-unify leftRow rightRow
-    | and (Map.elems (Map.intersectionWith (==) leftRow rightRow)) = Just (Map.union leftRow rightRow)
-    | otherwise = Nothing
-
-data Delta a = Delta [a]
-    deriving (Show,Eq,Ord)
-
-runIncremental :: Query s a -> Event -> Delta a
-runIncremental (Empty _) _ = Delta []
-runIncremental (Constant _ row) _ = Delta [row]
-runIncremental (From _ fromTableName) (Insert insertTableName row)
-    | fromTableName == insertTableName = Delta [row]
-    | otherwise = Delta []
-runIncremental (Project _ function query) event = Delta (Prelude.map function rows) where
-    Delta rows = runIncremental query event
-runIncremental (Join _ leftHash rightHash left right) event = Delta (do
-    let Delta addedLeft = runIncremental left event
-        Delta addedRight = runIncremental right event
-    return undefined)
-
+feed :: Event -> Incremental a -> Diff a
+feed = undefined
 
 main :: IO ()
 main = do
