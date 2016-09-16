@@ -16,10 +16,10 @@ extra-source-files:  README.md
 cabal-version:       >=1.10
 
 library
-  -- exposed-modules:     
+  exposed-modules:     IncrementalQuery
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.7 && <4.9,
+  build-depends:       base >=4.7 && <5.0,
                        containers >=0.5.6.3 && <0.6,
                        hashable >=1.2.3.2 && <1.3
   hs-source-dirs:      src
