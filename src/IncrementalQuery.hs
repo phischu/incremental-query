@@ -7,14 +7,14 @@ import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
+import Data.List (intercalate)
 import Data.Hashable (hash)
 import Control.Applicative (
   Alternative(empty, (<|>)))
-import Control.Monad (guard, ap, (>=>))
+import Control.Monad (
+  MonadPlus(mzero, mplus),
+  guard, ap, (>=>))
 import Data.Monoid (Product)
-import Control.Monad.Operational (
-  Program, singleton,
-  ProgramViewT(Return, (:>>=)), view)
 
 
 newtype Ring r a = Ring { runRing :: [(r, a)] }
@@ -48,39 +48,56 @@ type Occurence = Product Int
 type Variable = String
 type TableName = String
 
-data QueryInstruction a where
-  Table :: TableName -> QueryInstruction Variable
-  Plus :: Query Variable -> Query Variable -> QueryInstruction Variable
+data Query f a where
+  Pure :: a -> Query f a
+  Bind :: f e -> (e -> Query f a) -> Query f a
+  MSum :: [Query f a] -> Query f a
 
-type Query = Program QueryInstruction
+instance Monad (Query f) where
+  return = Pure
+  Pure a >>= k = k a
+  Bind f k' >>= k = Bind f (k' >=> k)
+  MSum qs >>= k = MSum ((map (>>= k)) qs)
 
-instance Alternative Query where
-  empty = undefined
-  q1 <|> q2 = case (view q1, view q2) of
-    (Return a1, Return a2) -> error "aha here we go"
+instance Applicative (Query f) where
+  pure = Pure
+  (<*>) = ap
 
-prettyQuery :: (Show a) => Query a -> String
-prettyQuery q = case view q of
-  Return a ->
-    "return " ++ show a
-  Table tablename :>>= k ->
-    "hi <- Table " ++ tablename ++ "\n" ++ prettyQuery (k "hi")
-  Plus q1 q2 :>>= k ->
-    prettyQuery q1 ++ " <|> " ++ prettyQuery q2 ++ "\n" ++ prettyQuery (k "ho")
+instance Functor (Query f) where
+  fmap f q = q >>= return . f
 
-exampleQuery :: Query (Variable, Variable)
+instance MonadPlus (Query f) where
+  mzero = MSum []
+  mplus q1 q2 = MSum [q1, q2]
+
+instance Alternative (Query f) where
+  empty = mzero
+  (<|>) = mplus
+
+data Table a where
+  Table :: TableName -> Table Variable
+
+prettyQuery :: (Show a) => Query Table a -> String
+prettyQuery (Pure a) =
+  "return " ++ show a
+prettyQuery (Bind (Table tablename) k) =
+  "hi <- Table " ++ tablename ++ "\n" ++ prettyQuery (k "hi")
+prettyQuery (MSum qs) =
+  intercalate " <|> " (map prettyQuery qs)
+
+exampleQuery :: Query Table (Variable, Variable)
 exampleQuery = do
   x <- table "users"
   y <- table "items"
   return (x, y)
 
-alternativeQuery :: Query Variable
+alternativeQuery :: Query Table Variable
 alternativeQuery = do
   x <- (table "users" <|> table "items")
   return x
 
-table :: TableName -> Query Variable
-table = singleton . Table
+table :: TableName -> Query Table Variable
+table tablename = Bind (Table tablename) Pure
 
 {-
 data Query a where
