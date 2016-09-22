@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes #-}
 module IncrementalQuery where
 
 
@@ -12,7 +12,7 @@ import Data.Hashable (hash)
 import Control.Applicative (
   Alternative(empty, (<|>)))
 import Control.Monad (
-  MonadPlus(mzero, mplus),
+  MonadPlus(mzero, mplus), msum,
   guard, ap, (>=>))
 import Data.Monoid (Product)
 
@@ -46,18 +46,23 @@ instance (Monoid r) => Monad (Ring r) where
 type Occurence = Product Int
 
 type Variable = String
+type Database = Map TableName [Row]
 type TableName = String
+type ColumnName = String
+type Row = Map ColumnName String
 
 data Query f a where
   Pure :: a -> Query f a
   Bind :: f e -> (e -> Query f a) -> Query f a
-  MSum :: [Query f a] -> Query f a
+  Zero :: Query f a -- not their Sum
+  Plus :: Query f a -> Query f a -> Query f a
 
 instance Monad (Query f) where
   return = Pure
   Pure a >>= k = k a
   Bind f k' >>= k = Bind f (k' >=> k)
-  MSum qs >>= k = MSum ((map (>>= k)) qs)
+  Zero >>= _ = Zero
+  Plus q1 q2 >>= k= Plus (q1 >>= k) (q2 >>= k)
 
 instance Applicative (Query f) where
   pure = Pure
@@ -67,8 +72,8 @@ instance Functor (Query f) where
   fmap f q = q >>= return . f
 
 instance MonadPlus (Query f) where
-  mzero = MSum []
-  mplus q1 q2 = MSum [q1, q2]
+  mzero = Zero
+  mplus q1 q2 = Plus q1 q2 -- TODO more normalization
 
 instance Alternative (Query f) where
   empty = mzero
@@ -82,8 +87,10 @@ prettyQuery (Pure a) =
   "return " ++ show a
 prettyQuery (Bind (Table tablename) k) =
   "hi <- Table " ++ tablename ++ "\n" ++ prettyQuery (k "hi")
-prettyQuery (MSum qs) =
-  intercalate " <|> " (map prettyQuery qs)
+prettyQuery Zero =
+  "mzero"
+prettyQuery (Plus q1 q2) =
+  "mplus (" ++ prettyQuery q1 ++ ") (" ++ prettyQuery q2 ++ ")"
 
 exampleQuery :: Query Table (Variable, Variable)
 exampleQuery = do
@@ -99,40 +106,41 @@ alternativeQuery = do
 table :: TableName -> Query Table Variable
 table tablename = Bind (Table tablename) Pure
 
+delta :: TableName -> Row -> Query Table a -> Query Table a
+delta t r = derivative (\(Table tablename) -> case t == tablename of
+  False -> mzero
+  True -> return (show r))
+
+derivative :: (forall a . f a -> Query f a) -> Query f a -> Query f a
+derivative _ (Pure _) =
+  mzero
+derivative deriveF (Bind fe k) = msum [
+  deriveF fe >>= k,
+  Bind fe (derivative deriveF . k),
+  deriveF fe >>= derivative deriveF . k]
+derivative _ Zero = mzero
+derivative deriveF (Plus q1 q2) =
+  mplus (derivative deriveF q1) (derivative deriveF q2)
+
+
+-- | The degree of a query (like with polynomials)
+degree :: Query Table a -> Integer
+degree (Pure a) = 0
+degree (Bind (Table _) k) = 1 + degree (k "oi")
+degree (Zero) = 0
+degree (Plus q1 q2) = max (degree q1) (degree q2)
+
+-- degree (delta t r q) == max 0 (degree q - 1)
+
+-- TODO what's with expressions ((==), ...)
+-- TODO aggregates (what their comparison operators do)
+-- TODO negation
+-- FUTURE WORK recursive queries
+
+-- Examples from "Ring of databases" paper
+
+
 {-
-data Query a where
-  Pure :: a -> Query a
-  Fmap :: (a -> b) -> Query a -> Query b
-  LiftA2 :: (a -> b -> c) -> Query a -> Query b -> Query c
-  Join :: Query (Query a) -> Query a
-  Mzero :: Query a
-  Mplus :: Query a -> Query a -> Query a
-  Mnegate :: Query a -> Query a
-  Table :: TableName -> Query Row
-
-instance Functor Query where
-  fmap = Fmap
-
-instance Applicative Query where
-  pure = Pure
-  qf <*> qa = LiftA2 ($) qf qa
-
-instance Monad Query where
-  return = Pure
-  qa >>= qf = Join (Fmap qf qa)
-
-instance Alternative Query where
-  empty = Mzero
-  (<|>) = Mplus
-
-table :: TableName -> Query Row
-table = Table
-
-runQuery :: Database -> Query a -> [a]
-runQuery _ (Pure a) = [a]
-runQuery d (Fmap f q) = map f (runQuery d q)
-runQuery d (Join q) = concatMap (runQuery d) (runQuery d q)
-runQuery d (Table t) = maybe [] id (Map.lookup t d)
 
 example_4_1 :: Ring Occurence (String, String)
 example_4_1 = r_A >>= (\(x, y) -> guard (y == "b1") >> return (x, y)) where
@@ -170,11 +178,6 @@ delta t r (Table t') = case t == t' of
 
 -- q (insert t r d) = q d `Mplus` delta t r (q d) ???
 
-type Database = Map TableName Table
-type TableName = String
-type Table = [Row]
-type ColumnName = String
-type Row = Map ColumnName String
 -}
 {-
 data Event = Insert TableName Row
