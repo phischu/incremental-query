@@ -10,7 +10,7 @@ import Data.Maybe (fromMaybe)
 import Data.List (intercalate)
 import Data.Hashable (hash)
 import Control.Applicative (
-  Alternative(empty, (<|>)))
+  Alternative(empty, (<|>)), liftA2)
 import Control.Monad (
   MonadPlus(mzero, mplus), msum,
   guard, ap, (>=>))
@@ -80,36 +80,48 @@ instance Alternative (Query f) where
   (<|>) = mplus
 
 data Table a where
-  Table :: TableName -> Table Variable
+  Table :: TableName -> Table Expression
+
+data Expression =
+  Variable String |
+  Field Expression String |
+  Equal Expression Expression
+
+
+multiplicity :: a -> Rational -> Query f a
+multiplicity = undefined
+
+guard' :: Expression -> Query f ()
+guard' = undefined
 
 prettyQuery :: (Show a) => Query Table a -> String
 prettyQuery (Pure a) =
   "return " ++ show a
 prettyQuery (Bind (Table tablename) k) =
-  "hi <- Table " ++ tablename ++ "\n" ++ prettyQuery (k "hi")
+  "hi <- Table " ++ tablename ++ "\n" ++ prettyQuery (k (Variable "hi"))
 prettyQuery Zero =
   "mzero"
 prettyQuery (Plus q1 q2) =
   "mplus (" ++ prettyQuery q1 ++ ") (" ++ prettyQuery q2 ++ ")"
 
-exampleQuery :: Query Table (Variable, Variable)
+exampleQuery :: Query Table (Expression, Expression)
 exampleQuery = do
   x <- table "users"
   y <- table "items"
   return (x, y)
 
-alternativeQuery :: Query Table Variable
+alternativeQuery :: Query Table Expression
 alternativeQuery = do
   x <- (table "users" <|> table "items")
   return x
 
-table :: TableName -> Query Table Variable
+table :: TableName -> Query Table Expression
 table tablename = Bind (Table tablename) Pure
 
 delta :: TableName -> Row -> Query Table a -> Query Table a
 delta t r = derivative (\(Table tablename) -> case t == tablename of
   False -> mzero
-  True -> return (show r))
+  True -> return (Variable (show r)))
 
 derivative :: (forall a . f a -> Query f a) -> Query f a -> Query f a
 derivative _ (Pure _) =
@@ -126,7 +138,7 @@ derivative deriveF (Plus q1 q2) =
 -- | The degree of a query (like with polynomials)
 degree :: Query Table a -> Integer
 degree (Pure a) = 0
-degree (Bind (Table _) k) = 1 + degree (k "oi")
+degree (Bind (Table _) k) = 1 + degree (k (Variable "oi"))
 degree (Zero) = 0
 degree (Plus q1 q2) = max (degree q1) (degree q2)
 
@@ -137,10 +149,50 @@ degree (Plus q1 q2) = max (degree q1) (degree q2)
 -- TODO negation
 -- FUTURE WORK recursive queries
 
--- Examples from "Ring of databases" paper
+
+-- Examples from "DBToaster" paper
+
+-- | Count the number of tuples in the product of 'R' and 'S'.
+example_1 :: Query Table ()
+example_1  = liftA2 (const (const ())) (table "R") (table "S")
+
+-- | Total sales across all orders weighted by exchange rate.
+example_2 :: Query Table ()
+example_2 = do
+  o <- table "Orders"
+  li <- table "LineItems"
+  guard' (Equal (Field o "ORDK") (Field li "ORDK"))
+  multiplicity () (undefined (Field li "PRICE") (Field o "XCH"))
+
+data Order = Order {
+  orderORDK :: Int,
+  orderXCH :: Rational
+  }
+
+data LineItem = LineItem {
+  lineItemORDK :: Int,
+  lineItemPRICE :: Rational
+  }
+
+-- | Join on 'B' and 'C'.
+example_3 :: Query Table Expression
+example_3 = liftA2 (\r s -> Equal (Field r "B") (Field s "C")) (table "R") (table "S")
+
+-- delta_example_3 deltaR = delta deltaR empty example_3
+
+type A = ()
+type B = ()
+type C = ()
+type D = ()
+
+-- Derivative on 'r' specialized to a single tuple.
+-- example_4 x y = delta (singleTuple (x, y)) empty example_3
+
 
 
 {-
+
+-- Examples from "Ring of Databases" paper
 
 example_4_1 :: Ring Occurence (String, String)
 example_4_1 = r_A >>= (\(x, y) -> guard (y == "b1") >> return (x, y)) where
@@ -148,7 +200,6 @@ example_4_1 = r_A >>= (\(x, y) -> guard (y == "b1") >> return (x, y)) where
   r1 = 1
   r2 = 1
 
-{-
 example_5_2 :: String -> Query ()
 example_5_2 cid = do
   (c, n) <- customers
@@ -156,13 +207,16 @@ example_5_2 cid = do
   guard (n == n')
   guard (c == cid)
   return ()
--}
 
 example :: Query Row
 example = do
   u <- table "users"
   return u
 
+-}
+
+{-
+-- Other examples
 
 delta :: TableName -> Row -> Query a -> Query a
 delta t r (Pure a) = Mzero
