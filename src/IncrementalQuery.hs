@@ -64,6 +64,9 @@ instance Monad (Query f) where
   Zero >>= _ = Zero
   Plus q1 q2 >>= k= Plus (q1 >>= k) (q2 >>= k)
 
+-- Remove Bind? And add LiftA2?
+-- Add Factor?
+
 instance Applicative (Query f) where
   pure = Pure
   (<*>) = ap
@@ -84,15 +87,24 @@ data Table a where
 
 data Expression =
   Variable String |
+  Constant Rational |
   Field Expression String |
-  Equal Expression Expression
+  Equal Expression Expression |
+  Smaller Expression Expression |
+  Larger Expression Expression
 
 
 multiplicity :: a -> Rational -> Query f a
 multiplicity = undefined
 
+factor :: Expression -> Query f ()
+factor = undefined
+
 guard' :: Expression -> Query f ()
 guard' = undefined
+
+runSubquery :: Query f () -> Query f Rational
+runSubquery = undefined
 
 prettyQuery :: (Show a) => Query Table a -> String
 prettyQuery (Pure a) =
@@ -150,7 +162,7 @@ degree (Plus q1 q2) = max (degree q1) (degree q2)
 -- FUTURE WORK recursive queries
 
 
--- Examples from "DBToaster" paper
+-- Examples from "DBToaster" extended report.
 
 -- | Count the number of tuples in the product of 'R' and 'S'.
 example_1 :: Query Table ()
@@ -174,21 +186,53 @@ data LineItem = LineItem {
   lineItemPRICE :: Rational
   }
 
--- | Join on 'B' and 'C'.
-example_3 :: Query Table Expression
-example_3 = liftA2 (\r s -> Equal (Field r "B") (Field s "C")) (table "R") (table "S")
-
--- delta_example_3 deltaR = delta deltaR empty example_3
-
-type A = ()
-type B = ()
-type C = ()
-type D = ()
-
--- Derivative on 'r' specialized to a single tuple.
--- example_4 x y = delta (singleTuple (x, y)) empty example_3
+example_3 :: Query Table (Expression, Expression)
+example_3 = do
+  r <- table "R"
+  let x = Field r "A"
+      y = Field r "B"
+  guard' (Smaller x y)
+  return (x, y)
 
 
+example_4 :: Query Table Expression
+example_4 = do
+  r <- table "R"
+  let x = Field r "A"
+      y = Field r "B"
+  factor (Constant 2)
+  factor x
+  return y
+
+example_5 :: Query Table Expression
+example_5 = do
+  r <- table "R"
+  n <- runSubquery (do
+     s <- table "S"
+     guard' (Larger (Field r "A") (Field s "C"))
+     factor (Field s "D")
+     return ())
+  guard' (Smaller (Field r "B") (Constant n))
+  -- guard' (Smaller (Field r "B") (SubQuery q))
+  return r
+
+example_6 :: Query Table ()
+example_6 = do
+  r <- table "R"
+  s <- table "S"
+  guard' (Equal (Field r "B") (Field s "C"))
+  factor (Field r "A")
+  factor (Field s "D")
+  return ()
+
+-- | Delta of assignment.
+example_7 = error "uses delta inside"
+
+-- | Taking deltas adds input variables.
+example_8 = error "delta example_5"
+
+-- | Second order delta for example 6
+example_9 = error "second order delta"
 
 {-
 
