@@ -156,10 +156,10 @@ degree (Plus q1 q2) = max (degree q1) (degree q2)
 
 -- degree (delta t r q) == max 0 (degree q - 1)
 
--- TODO what's with expressions ((==), ...)
--- TODO aggregates (what their comparison operators do)
+-- TODO aggregates (what their comparison operators do) (== subqueries?)
 -- TODO negation
--- FUTURE WORK recursive queries
+-- TODO range joins?
+-- TODO recursive queries
 
 
 -- Examples from "DBToaster" extended report.
@@ -234,6 +234,37 @@ example_8 = error "delta example_5"
 -- | Second order delta for example 6
 example_9 = error "second order delta"
 
+-- | We don't have to materialize all subqueries.
+example_11 = error "delta query of example 7"
+
+-- TODO convincing example that DBToaster approach is better than usual incrementalization
+-- Perhaps because it subsumes all optimizations from `Reify your collection API ...`
+
+-- Examples from "Incremental Collection Programs" paper
+
+{-
+
+-- Example 1
+
+related = do
+  m <- movies
+  return (name m, relB m)
+
+relB m = do
+  m2 <- movies
+  guard (isRelated m m2)
+  return m2.name
+
+isRelated m m2 = name m /= name m2 && (genre m == genre m2 || director m == director m2)
+
+
+filter p q = do
+  x <- q
+  guard (p x)
+  return x
+
+
+-}
 {-
 
 -- Examples from "Ring of Databases" paper
@@ -258,6 +289,30 @@ example = do
   return u
 
 -}
+
+{-
+Looks like we need a real polynomial normal form e.g. transform a program like
+
+query = do
+  x <- table "R"
+  if (field x "A" == "Value")
+    then return x
+    else empty
+
+into
+
+query = do
+  x <- tableWithFieldEqual "R" "A" "Value"
+  return x
+    `mplus` do
+  x <- tableWithFieldUnequal "R" "A" "Value"
+  empty
+
+TODO how to apply this transformation during construction? Does the Decidable class play a role?
+
+-}
+
+
 
 {-
 -- Other examples
