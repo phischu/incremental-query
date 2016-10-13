@@ -14,7 +14,6 @@ import Control.Applicative (
 import Control.Monad (
   MonadPlus(mzero, mplus), msum,
   guard, ap, (>=>))
-import Data.Monoid (Product)
 
 
 
@@ -70,13 +69,13 @@ runQuery :: [v] -> Query v a -> [a]
 runQuery rows (Pure a) = [a]
 runQuery rows (Bind Database k) = concatMap (runQuery rows . k) rows
 runQuery _     (Zero) = []
-runQuery rows (Plus q1 q2) = runQuery rows q1 ++ runQuery rows q2
+runQuery rows (Plus q1 q2) = (++) (runQuery rows q1) (runQuery rows q2)
 
 runQueryNoDB :: Query v a -> [a]
 runQueryNoDB (Pure a) = [a]
 runQueryNoDB (Bind Database k) = (runQueryNoDB (k (error "No DB")))
 runQueryNoDB (Zero) = []
-runQueryNoDB (Plus q1 q2) = runQueryNoDB q1 ++ runQueryNoDB q2
+runQueryNoDB (Plus q1 q2) = (++) (runQueryNoDB q1) (runQueryNoDB q2)
 
 derivative :: v -> Query v a -> Query v a
 derivative _ (Pure _) =
@@ -135,8 +134,8 @@ insertDelta rows query delta cache =
     False -> Map.insert delta (runQuery rows (derivative delta query)) cache
     True -> cache
 
-deltaQuery :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
-deltaQuery rows query delta =
+runDeltaQuery :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
+runDeltaQuery rows query delta =
   insertDelta rows query delta . refreshCaches query delta
 
 main :: IO ()
@@ -144,10 +143,10 @@ main = do
   printQuery cross
   printQuery (derivative "d" cross)
   printQuery (derivative "dd" (derivative "d" cross))
-  print (deltaQuery [] cross 4 emptyCache)
-  print (deltaQuery [1,2,3] cross 4 emptyCache)
-  print (deltaQuery [1,2,3] cross 4 (deltaQuery [1,2] cross 3 emptyCache))
-  print (deltaQuery [1,2] cross 1 (deltaQuery [1] cross 2 emptyCache))
+  print (runDeltaQuery [] cross 4 emptyCache)
+  print (runDeltaQuery [1,2,3] cross 4 emptyCache)
+  print (runDeltaQuery [1,2,3] cross 4 (runDeltaQuery [1,2] cross 3 emptyCache))
+  print (runDeltaQuery [1,2] cross 1 (runDeltaQuery [1] cross 2 emptyCache))
 
 variables :: [Variable]
 variables = ["x", "y", "z"]
