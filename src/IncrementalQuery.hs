@@ -6,7 +6,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import Data.List (intercalate)
 import Data.Hashable (hash)
 import Control.Applicative (
@@ -66,25 +66,30 @@ cross = do
   y <- db
   return (x, y)
 
-runQuery :: [Row] -> Query Row a -> [a]
+runQuery :: [v] -> Query v a -> [a]
 runQuery rows (Pure a) = [a]
 runQuery rows (Bind Database k) = concatMap (runQuery rows . k) rows
 runQuery _     (Zero) = []
 runQuery rows (Plus q1 q2) = runQuery rows q1 ++ runQuery rows q2
 
-derivative :: Query v a -> v -> Query v a
-derivative (Pure _) _ =
+runQueryNoDB :: Query v a -> [a]
+runQueryNoDB (Pure a) = [a]
+runQueryNoDB (Bind Database k) = (runQueryNoDB (k (error "No DB")))
+runQueryNoDB (Zero) = []
+runQueryNoDB (Plus q1 q2) = runQueryNoDB q1 ++ runQueryNoDB q2
+
+derivative :: v -> Query v a -> Query v a
+derivative _ (Pure _) =
   mzero
-derivative (Bind Database k) delta = msum [
-  pure delta >>= k,
-  db >>= derivativeK,
-  pure delta >>= derivativeK] where
-    derivativeK = flip derivative delta . k
-derivative (Zero) _ =
+derivative d (Bind Database k) = msum [
+  pure d >>= k,
+  db >>= derivative d . k,
+  pure d >>= derivative d . k]
+derivative _ (Zero) =
   mzero
-derivative (Plus q1 q2) delta = msum [
-  derivative q1 delta,
-  derivative q2 delta]
+derivative d (Plus q1 q2) = msum [
+  derivative d q1,
+  derivative d q2]
 
 showQuery :: (Show a) => [Variable] -> Query Variable a -> String
 showQuery _ (Pure a) =
@@ -106,18 +111,43 @@ simplify (Bind Database k) =
 simplify Zero =
   Zero
 simplify (Plus q1 q2) =
-  case simplify q1 of
-    Zero -> simplify q2
-    _ -> case simplify q2 of
-      Zero -> simplify q1
-      _ -> Plus (simplify q1) (simplify q2)
+  case (simplify q1, simplify q2) of
+    (Zero, Zero) -> Zero
+    (Zero, _) -> simplify q2
+    (_, Zero) -> simplify q1
+    _ -> Plus (simplify q1) (simplify q2)
 
+
+type Cache v a = Map v [a]
+
+emptyCache :: Cache v a
+emptyCache = Map.empty
+
+refreshCaches :: (Ord v) => Query v a -> v -> Cache v a -> Cache v a
+refreshCaches query delta cache =
+  Map.unionWith (++) cache deltaCache where
+    deltaCache = Map.mapWithKey (\deltaKey _ ->
+      runQueryNoDB (derivative delta (derivative deltaKey query))) cache
+
+insertDelta :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
+insertDelta rows query delta cache =
+  case Map.member delta cache of
+    False -> Map.insert delta (runQuery rows (derivative delta query)) cache
+    True -> cache
+
+deltaQuery :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
+deltaQuery rows query delta =
+  insertDelta rows query delta . refreshCaches query delta
 
 main :: IO ()
 main = do
   printQuery cross
-  printQuery (derivative cross "d")
-  printQuery (derivative (derivative cross "d") "dd")
+  printQuery (derivative "d" cross)
+  printQuery (derivative "dd" (derivative "d" cross))
+  print (deltaQuery [] cross 4 emptyCache)
+  print (deltaQuery [1,2,3] cross 4 emptyCache)
+  print (deltaQuery [1,2,3] cross 4 (deltaQuery [1,2] cross 3 emptyCache))
+  print (deltaQuery [1,2] cross 1 (deltaQuery [1] cross 2 emptyCache))
 
 variables :: [Variable]
 variables = ["x", "y", "z"]
