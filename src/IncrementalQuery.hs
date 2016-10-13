@@ -17,6 +17,115 @@ import Control.Monad (
 import Data.Monoid (Product)
 
 
+
+data FreerMonadPlus f a where
+  Pure :: a -> FreerMonadPlus f a
+  Bind :: f e -> (e -> FreerMonadPlus f a) -> FreerMonadPlus f a
+  Zero :: FreerMonadPlus f a
+  Plus :: FreerMonadPlus f a -> FreerMonadPlus f a -> FreerMonadPlus f a
+
+instance Monad (FreerMonadPlus f) where
+  return = Pure
+  Pure a     >>= k = k a
+  Bind f k'  >>= k = Bind f (k' >=> k)
+  Zero       >>= _ = Zero
+  Plus q1 q2 >>= k = Plus (q1 >>= k) (q2 >>= k)
+
+instance Applicative (FreerMonadPlus f) where
+  pure = Pure
+  (<*>) = ap
+
+instance Functor (FreerMonadPlus f) where
+  fmap f q = q >>= return . f
+
+instance MonadPlus (FreerMonadPlus f) where
+  mzero = Zero
+  mplus q1 q2 = Plus q1 q2 -- TODO more normalization
+
+instance Alternative (FreerMonadPlus f) where
+  empty = mzero
+  (<|>) = mplus
+
+
+data Database v a where
+  Database :: Database v v
+
+type Query v = FreerMonadPlus (Database v)
+
+db :: Query v v
+db = Bind Database Pure
+
+type ColumnName = String
+type Row = Map ColumnName String
+type Variable = String
+
+
+cross :: Query v (v, v)
+cross = do
+  x <- db
+  y <- db
+  return (x, y)
+
+runQuery :: [Row] -> Query Row a -> [a]
+runQuery rows (Pure a) = [a]
+runQuery rows (Bind Database k) = concatMap (runQuery rows . k) rows
+runQuery _     (Zero) = []
+runQuery rows (Plus q1 q2) = runQuery rows q1 ++ runQuery rows q2
+
+derivative :: Query v a -> v -> Query v a
+derivative (Pure _) _ =
+  mzero
+derivative (Bind Database k) delta = msum [
+  pure delta >>= k,
+  db >>= derivativeK,
+  pure delta >>= derivativeK] where
+    derivativeK = flip derivative delta . k
+derivative (Zero) _ =
+  mzero
+derivative (Plus q1 q2) delta = msum [
+  derivative q1 delta,
+  derivative q2 delta]
+
+showQuery :: (Show a) => [Variable] -> Query Variable a -> String
+showQuery _ (Pure a) =
+  "pure " ++ show a
+showQuery (v : vs) (Bind Database k) =
+  "db >>= (\\" ++ v ++ " -> " ++ showQuery vs (k v)++ ")"
+showQuery _ (Zero) =
+  "mzero"
+showQuery vs (Plus q1 q2) =
+  "mplus (" ++ showQuery vs q1 ++ ") (" ++ showQuery vs q2 ++ ")" where
+
+simplify :: Query Variable a -> Query Variable a
+simplify (Pure a) =
+  Pure a
+simplify (Bind Database k) =
+  case simplify (k "") of
+    Zero -> Zero
+    _ -> Bind Database (simplify . k)
+simplify Zero =
+  Zero
+simplify (Plus q1 q2) =
+  case simplify q1 of
+    Zero -> simplify q2
+    _ -> case simplify q2 of
+      Zero -> simplify q1
+      _ -> Plus (simplify q1) (simplify q2)
+
+
+main :: IO ()
+main = do
+  printQuery cross
+  printQuery (derivative cross "d")
+  printQuery (derivative (derivative cross "d") "dd")
+
+variables :: [Variable]
+variables = ["x", "y", "z"]
+
+printQuery :: (Show a) => Query Variable a -> IO ()
+printQuery = putStrLn . showQuery variables . simplify
+
+{-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
   deriving (Show)
 
@@ -45,42 +154,8 @@ instance (Monoid r) => Monad (Ring r) where
 
 type Occurence = Product Int
 
-type Variable = String
 type Database = Map TableName [Row]
 type TableName = String
-type ColumnName = String
-type Row = Map ColumnName String
-
-data Query f a where
-  Pure :: a -> Query f a
-  Bind :: f e -> (e -> Query f a) -> Query f a
-  Zero :: Query f a -- not their Sum
-  Plus :: Query f a -> Query f a -> Query f a
-
-instance Monad (Query f) where
-  return = Pure
-  Pure a >>= k = k a
-  Bind f k' >>= k = Bind f (k' >=> k)
-  Zero >>= _ = Zero
-  Plus q1 q2 >>= k= Plus (q1 >>= k) (q2 >>= k)
-
--- Remove Bind? And add LiftA2?
--- Add Factor?
-
-instance Applicative (Query f) where
-  pure = Pure
-  (<*>) = ap
-
-instance Functor (Query f) where
-  fmap f q = q >>= return . f
-
-instance MonadPlus (Query f) where
-  mzero = Zero
-  mplus q1 q2 = Plus q1 q2 -- TODO more normalization
-
-instance Alternative (Query f) where
-  empty = mzero
-  (<|>) = mplus
 
 data Table a where
   Table :: TableName -> Table Expression
@@ -160,6 +235,7 @@ degree (Plus q1 q2) = max (degree q1) (degree q2)
 -- TODO negation
 -- TODO range joins?
 -- TODO recursive queries
+-- TODO first class indexes
 
 
 -- Examples from "DBToaster" extended report.
@@ -237,9 +313,15 @@ example_9 = error "second order delta"
 -- | We don't have to materialize all subqueries.
 example_11 = error "delta query of example 7"
 
+-- | Query simplification
+example_12 = error "simplification not implemented"
+
+-- | Reducing assignments
+example_13 = error "assignment is not implemented"
+
 -- TODO convincing example that DBToaster approach is better than usual incrementalization
 -- Perhaps because it subsumes all optimizations from `Reify your collection API ...`
-
+-}
 -- Examples from "Incremental Collection Programs" paper
 
 {-
@@ -258,11 +340,45 @@ relB m = do
 isRelated m m2 = name m /= name m2 && (genre m == genre m2 || director m == director m2)
 
 
-filter p q = do
-  x <- q
+-- Example 2
+
+filter p = do
+  x <- database
   guard (p x)
   return x
 
+
+-- Example 3
+
+delta (filter p) r dr = do
+  x <- dr
+  guard (p x)
+  return x
+
+
+-- Example 4
+
+h r = liftA2 (,) (flatten r) (flatten r)
+
+delta h r dr =
+  mplus (cross (flatten r) (flatten dr)) (cross (flatten dr) (mplus (flatten r) (flatten dr)))
+
+delta (delta h) r dr ddr =
+  mplus (cross (flatten ddr) (flatten dr)) (cross (flatten dr) (flatten ddr))
+
+-- initialize
+h0 = materialize (h r)
+h1 dr = materialize (delta h r dr)
+
+-- update
+h0 += mplus h0 (h1 u)
+h1 dr += mplus (h1 dr) (delta (delta h) undefined dr u)
+
+
+-- Example 5
+
+cost (related m) = BagCost (size m) (TupleCost 1 (BagCost (size m) 1))
+running_time_upper_bound (related m) = size m * (1 + size m)
 
 -}
 {-
