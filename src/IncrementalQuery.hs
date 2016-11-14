@@ -16,6 +16,64 @@ import Control.Monad (
   guard, ap, (>=>))
 
 
+main :: IO ()
+main = do
+  printQuery cross
+  printQuery (derivative "d" cross)
+  printQuery (derivative "dd" (derivative "d" cross))
+  putStrLn ""
+  print (initializeCache 2 [1] cross)
+  print (updateCache 1 (initializeCache 2 [1] cross))
+  print (initializeCache 2 [1,2] cross)
+  print (updateCache 2 (updateCache 1 (initializeCache 2 [1,2] cross)))
+  putStrLn ""
+  print (initializeCache 1 [1,2] condition)
+  print (updateCache 2 (initializeCache 1 [1,2] condition))
+  putStrLn ""
+  print (initializeCache 2 salesDomain sales)
+
+cross :: Query v (v, v)
+cross = do
+  x <- db
+  y <- db
+  return (x, y)
+
+
+condition :: (Eq v, Num v) => Query v v
+condition = do
+  x <- db
+  guard (x == 1)
+  return x
+
+sales :: Query Row Int
+sales = do
+  Order orderKey orderExchange <- db
+  LineItem lineItemKey lineItemPrice <- db
+  guard (orderKey == lineItemKey)
+  return (lineItemPrice * orderExchange)
+
+salesDomain :: [Row]
+salesDomain = [
+  Order 0 1,
+  Order 1 2,
+  LineItem 0 10,
+  LineItem 0 20,
+  LineItem 1 30]
+
+
+data Row = Order Key Exchange | LineItem Key Price
+  deriving (Show, Eq, Ord)
+
+type Key = Int
+type Exchange = Int
+type Price = Int
+
+
+type Query v = FreerMonadPlus (Database v)
+
+db :: Query v v
+db = Bind Database Pure
+
 
 data FreerMonadPlus f a where
   Pure :: a -> FreerMonadPlus f a
@@ -29,6 +87,7 @@ instance Monad (FreerMonadPlus f) where
   Bind f k'  >>= k = Bind f (k' >=> k)
   Zero       >>= _ = Zero
   Plus q1 q2 >>= k = Plus (q1 >>= k) (q2 >>= k)
+  fail _ = Zero
 
 instance Applicative (FreerMonadPlus f) where
   pure = Pure
@@ -49,33 +108,12 @@ instance Alternative (FreerMonadPlus f) where
 data Database v a where
   Database :: Database v v
 
-type Query v = FreerMonadPlus (Database v)
-
-db :: Query v v
-db = Bind Database Pure
-
-type ColumnName = String
-type Row = Map ColumnName String
-type Variable = String
-
-
-cross :: Query v (v, v)
-cross = do
-  x <- db
-  y <- db
-  return (x, y)
 
 runQuery :: [v] -> Query v a -> [a]
 runQuery rows (Pure a) = [a]
 runQuery rows (Bind Database k) = concatMap (runQuery rows . k) rows
-runQuery _     (Zero) = []
+runQuery _    (Zero) = []
 runQuery rows (Plus q1 q2) = (++) (runQuery rows q1) (runQuery rows q2)
-
-runQueryNoDB :: Query v a -> [a]
-runQueryNoDB (Pure a) = [a]
-runQueryNoDB (Bind Database k) = (runQueryNoDB (k (error "No DB")))
-runQueryNoDB (Zero) = []
-runQueryNoDB (Plus q1 q2) = (++) (runQueryNoDB q1) (runQueryNoDB q2)
 
 derivative :: v -> Query v a -> Query v a
 derivative _ (Pure _) =
@@ -90,6 +128,15 @@ derivative d (Plus q1 q2) = msum [
   derivative d q1,
   derivative d q2]
 
+
+type Variable = String
+
+variables :: [Variable]
+variables = ["x", "y", "z"]
+
+printQuery :: (Show a) => Query Variable a -> IO ()
+printQuery = putStrLn . showQuery variables . simplify
+
 showQuery :: (Show a) => [Variable] -> Query Variable a -> String
 showQuery _ (Pure a) =
   "pure " ++ show a
@@ -100,11 +147,12 @@ showQuery _ (Zero) =
 showQuery vs (Plus q1 q2) =
   "mplus (" ++ showQuery vs q1 ++ ") (" ++ showQuery vs q2 ++ ")" where
 
-simplify :: Query Variable a -> Query Variable a
+
+simplify :: Query v a -> Query v a
 simplify (Pure a) =
   Pure a
 simplify (Bind Database k) =
-  case simplify (k "") of
+  case simplify (k undefined) of
     Zero -> Zero
     _ -> Bind Database (simplify . k)
 simplify Zero =
@@ -116,43 +164,32 @@ simplify (Plus q1 q2) =
     (_, Zero) -> simplify q1
     _ -> Plus (simplify q1) (simplify q2)
 
+runIncremental :: [v] -> Query v a -> v -> [a]
+runIncremental rows query delta = runQuery rows (derivative delta query)
 
-type Cache v a = Map v [a]
+data Cache v a = Cache [a] (Map v (Cache v a))
+  deriving (Show)
 
-emptyCache :: Cache v a
-emptyCache = Map.empty
+updateCache :: (Ord v) => v -> Cache v a -> Cache v a
+updateCache delta (Cache results caches) = Cache results' caches' where
+  results' = case Map.lookup delta caches of
+    Just (Cache deltaResults _) -> results ++ deltaResults
+    Nothing -> results
+  caches' = Map.map (updateCache delta) caches
 
-refreshCaches :: (Ord v) => Query v a -> v -> Cache v a -> Cache v a
-refreshCaches query delta cache =
-  Map.unionWith (++) cache deltaCache where
-    deltaCache = Map.mapWithKey (\deltaKey _ ->
-      runQueryNoDB (derivative delta (derivative deltaKey query))) cache
+initializeCache :: (Ord v) => Int -> [v] -> Query v a -> Cache v a
+initializeCache depth domain query = Cache [] (initializeCaches depth domain query)
 
-insertDelta :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
-insertDelta rows query delta cache =
-  case Map.member delta cache of
-    False -> Map.insert delta (runQuery rows (derivative delta query)) cache
-    True -> cache
+initializeCaches :: (Ord v) => Int -> [v] -> Query v a -> Map v (Cache v a)
+initializeCaches 0 _ _ = Map.empty
+initializeCaches depth domain query = Map.fromList (do
+  delta <- domain
+  let derivativeQuery = derivative delta query
+      deltaResults = runQuery [] derivativeQuery
+      caches = initializeCaches (depth - 1) domain derivativeQuery
+      cache = Cache deltaResults caches
+  return (delta, cache))
 
-runDeltaQuery :: (Ord v) => [v] -> Query v a -> v -> Cache v a -> Cache v a
-runDeltaQuery rows query delta =
-  insertDelta rows query delta . refreshCaches query delta
-
-main :: IO ()
-main = do
-  printQuery cross
-  printQuery (derivative "d" cross)
-  printQuery (derivative "dd" (derivative "d" cross))
-  print (runDeltaQuery [] cross 4 emptyCache)
-  print (runDeltaQuery [1,2,3] cross 4 emptyCache)
-  print (runDeltaQuery [1,2,3] cross 4 (runDeltaQuery [1,2] cross 3 emptyCache))
-  print (runDeltaQuery [1,2] cross 1 (runDeltaQuery [1] cross 2 emptyCache))
-
-variables :: [Variable]
-variables = ["x", "y", "z"]
-
-printQuery :: (Show a) => Query Variable a -> IO ()
-printQuery = putStrLn . showQuery variables . simplify
 
 {-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
