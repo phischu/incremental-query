@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes #-}
+{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes, DeriveGeneric #-}
 module IncrementalQuery where
 
 
@@ -14,6 +14,12 @@ import Control.Applicative (
 import Control.Monad (
   MonadPlus(mzero, mplus), msum,
   guard, ap, (>=>))
+import Data.Monoid (
+  Sum(Sum))
+import Control.DeepSeq (
+  NFData)
+import GHC.Generics (
+  Generic)
 
 
 main :: IO ()
@@ -29,28 +35,30 @@ main = do
   putStrLn ""
   print (initializeCache 1 [1,2] condition)
   print (updateCache 2 (initializeCache 1 [1,2] condition))
+  print (updateCache 1 (initializeCache 1 [1,2] condition))
   putStrLn ""
   print (initializeCache 2 salesDomain sales)
+  print (updateCache (LineItem 0 20) (updateCache (LineItem 0 10) (updateCache (Order 0 1) (initializeCache 2 salesDomain sales))))
 
-cross :: Query v (v, v)
+cross :: Query v [(v, v)]
 cross = do
   x <- db
   y <- db
-  return (x, y)
+  return [(x, y)]
 
 
-condition :: (Eq v, Num v) => Query v v
+condition :: Query Int (Sum Int)
 condition = do
   x <- db
   guard (x == 1)
-  return x
+  return (Sum x)
 
-sales :: Query Row Int
+sales :: Query Row (Sum Int)
 sales = do
   Order orderKey orderExchange <- db
   LineItem lineItemKey lineItemPrice <- db
   guard (orderKey == lineItemKey)
-  return (lineItemPrice * orderExchange)
+  return (Sum (lineItemPrice * orderExchange))
 
 salesDomain :: [Row]
 salesDomain = [
@@ -62,7 +70,9 @@ salesDomain = [
 
 
 data Row = Order Key Exchange | LineItem Key Price
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Generic)
+
+instance NFData Row
 
 type Key = Int
 type Exchange = Int
@@ -108,12 +118,15 @@ instance Alternative (FreerMonadPlus f) where
 data Database v a where
   Database :: Database v v
 
-
 runQuery :: [v] -> Query v a -> [a]
-runQuery rows (Pure a) = [a]
-runQuery rows (Bind Database k) = concatMap (runQuery rows . k) rows
-runQuery _    (Zero) = []
-runQuery rows (Plus q1 q2) = (++) (runQuery rows q1) (runQuery rows q2)
+runQuery rows = foldQuery rows . fmap (:[])
+
+foldQuery :: (Monoid a) => [v] -> Query v a -> a
+foldQuery rows (Pure a) = a
+foldQuery rows (Bind Database k) = mconcat (map (foldQuery rows . k) rows)
+foldQuery _    (Zero) = mempty
+foldQuery rows (Plus q1 q2) = mappend (foldQuery rows q1) (foldQuery rows q2)
+
 
 derivative :: v -> Query v a -> Query v a
 derivative _ (Pure _) =
@@ -164,32 +177,47 @@ simplify (Plus q1 q2) =
     (_, Zero) -> simplify q1
     _ -> Plus (simplify q1) (simplify q2)
 
-runIncremental :: [v] -> Query v a -> v -> [a]
-runIncremental rows query delta = runQuery rows (derivative delta query)
+runIncremental :: (Monoid a) => [v] -> Query v a -> v -> a
+runIncremental rows query delta = foldQuery rows (derivative delta query)
 
-data Cache v a = Cache [a] (Map v (Cache v a))
-  deriving (Show)
+data Cache v a = Cache a (Map v (Cache v a))
+  deriving (Show, Generic)
 
-updateCache :: (Ord v) => v -> Cache v a -> Cache v a
+instance (NFData r, NFData a) => NFData (Cache r a)
+
+updateCache :: (Ord v, Monoid a) => v -> Cache v a -> Cache v a
 updateCache delta (Cache results caches) = Cache results' caches' where
   results' = case Map.lookup delta caches of
-    Just (Cache deltaResults _) -> results ++ deltaResults
+    Just (Cache deltaResults _) -> results `mappend` deltaResults
     Nothing -> results
   caches' = Map.map (updateCache delta) caches
 
-initializeCache :: (Ord v) => Int -> [v] -> Query v a -> Cache v a
-initializeCache depth domain query = Cache [] (initializeCaches depth domain query)
+initializeCache :: (Ord v, Monoid a) => Int -> [v] -> Query v a -> Cache v a
+initializeCache depth domain query = Cache mempty (initializeCaches depth domain query)
 
-initializeCaches :: (Ord v) => Int -> [v] -> Query v a -> Map v (Cache v a)
+initializeCaches :: (Ord v, Monoid a) => Int -> [v] -> Query v a -> Map v (Cache v a)
 initializeCaches 0 _ _ = Map.empty
 initializeCaches depth domain query = Map.fromList (do
   delta <- domain
   let derivativeQuery = derivative delta query
-      deltaResults = runQuery [] derivativeQuery
+      deltaResults = foldQuery [] derivativeQuery
       caches = initializeCaches (depth - 1) domain derivativeQuery
       cache = Cache deltaResults caches
   return (delta, cache))
 
+
+data Cache2 r a = Cache2 a (Map r a) (Map r (Map r a))
+  deriving (Show, Generic)
+
+updateCache2 :: (Ord r, Monoid a) => r -> Cache2 r a -> Cache2 r a
+updateCache2 delta (Cache2 result derivativeCache secondDerivativeCaches) =
+  Cache2 result' derivativeCache' secondDerivativeCaches where
+    result' = case Map.lookup delta derivativeCache of
+      Just derivative -> result `mappend` derivative
+      Nothing -> error "Delta not in derivative cache"
+    derivativeCache' = case Map.lookup delta secondDerivativeCaches of
+      Just secondDerivatives -> Map.unionWith mappend derivativeCache secondDerivatives
+      Nothing -> error "Delta not in secondDerivativeCache"
 
 {-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
