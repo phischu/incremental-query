@@ -206,8 +206,10 @@ initializeCaches depth domain query = Map.fromList (do
   return (delta, cache))
 
 
-data Cache2 r a = Cache2 a (Map r a) (Map r (Map r a))
+data Cache2 r a = Cache2 !a !(Map r a) !(Map r (Map r a))
   deriving (Show, Generic)
+
+instance (NFData r, NFData a) => NFData (Cache2 r a)
 
 updateCache2 :: (Ord r, Monoid a) => r -> Cache2 r a -> Cache2 r a
 updateCache2 delta (Cache2 result derivativeCache secondDerivativeCaches) =
@@ -216,8 +218,29 @@ updateCache2 delta (Cache2 result derivativeCache secondDerivativeCaches) =
       Just derivative -> result `mappend` derivative
       Nothing -> error "Delta not in derivative cache"
     derivativeCache' = case Map.lookup delta secondDerivativeCaches of
-      Just secondDerivatives -> Map.unionWith mappend derivativeCache secondDerivatives
+      Just secondDerivatives -> Map.unionWith mappend secondDerivatives derivativeCache
       Nothing -> error "Delta not in secondDerivativeCache"
+
+initializeCache2 :: (Ord r, Monoid a) => [r] -> Query r a -> Cache2 r a
+initializeCache2 domain query =
+  Cache2 mempty derivativeCaches secondDerivativeCaches where
+    derivativeCaches = Map.fromList (do
+      delta <- domain
+      let derivativeQuery = derivative delta query
+          derivativeResults = foldQuery [] derivativeQuery
+      return (delta, derivativeResults))
+    secondDerivativeCaches = Map.fromList (do
+      secondDelta <- domain
+      let secondDerivatives = Map.fromList (do
+            delta <- domain
+            let secondDerivativeQuery =
+                  derivative secondDelta (derivative delta query)
+                secondDerivativeResults =
+                  foldQuery [] secondDerivativeQuery
+            guard (not (null (foldQuery [] (fmap (:[]) secondDerivativeQuery))))
+            return (delta, secondDerivativeResults))
+      return (secondDelta, secondDerivatives))
+
 
 {-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
