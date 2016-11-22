@@ -211,6 +211,9 @@ data Cache2 r a = Cache2 !a !(Map r a) !(Map r (Map r a))
 
 instance (NFData r, NFData a) => NFData (Cache2 r a)
 
+emptyCache2 :: (Monoid a) => Cache2 r a
+emptyCache2 = Cache2 mempty Map.empty Map.empty
+
 updateCache2 :: (Ord r, Monoid a) => r -> Cache2 r a -> Cache2 r a
 updateCache2 delta (Cache2 result derivativeCache secondDerivativeCaches) =
   Cache2 result' derivativeCache' secondDerivativeCaches where
@@ -241,6 +244,50 @@ initializeCache2 domain query =
             return (delta, secondDerivativeResults))
       return (secondDelta, secondDerivatives))
 
+insertCache2 :: (Ord r, Monoid a) => [r] -> r -> Query r a -> Cache2 r a -> Cache2 r a
+insertCache2 rows delta query (Cache2 result derivativeCache secondDerivativesCache) =
+  Cache2 result' derivativeCache' secondDerivativesCache' where
+
+    result' =
+      mappend result deltaResult
+
+    derivativeCache' =
+      Map.unionsWith mappend [
+        derivativeCache, deltaDerivative, deltaDerivatives]
+
+    secondDerivativesCache' =
+      Map.unionsWith (Map.unionWith mappend) [
+        secondDerivativesCache, deltaSecondDerivative, deltaSecondDerivatives]
+
+    deltaResult =
+      foldQuery rows (derivative delta query)
+
+    deltaDerivative =
+      Map.singleton delta deltaResult
+
+    deltaDerivatives = Map.fromListWith mappend (do
+      row <- rows ++ [delta]
+      let secondDerivativeQuery =
+            derivative delta (derivative row query)
+          secondDerivativeResult =
+            foldQuery rows secondDerivativeQuery
+      return (row, secondDerivativeResult))
+
+    deltaSecondDerivative = Map.singleton delta (Map.fromListWith mappend (do
+      row <- rows
+      let secondDerivativeQuery =
+            derivative delta (derivative row query)
+          secondDerivativeResult =
+            foldQuery rows secondDerivativeQuery
+      return (row, secondDerivativeResult)))
+
+    deltaSecondDerivatives = (Map.fromListWith (Map.unionWith mappend) (do
+      row <- rows ++ [delta]
+      let secondDerivativeQuery =
+            derivative row (derivative delta query)
+          secondDerivativeResult =
+            foldQuery rows secondDerivativeQuery
+      return (row, Map.singleton delta secondDerivativeResult)))
 
 {-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
