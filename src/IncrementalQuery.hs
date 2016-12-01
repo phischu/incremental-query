@@ -175,11 +175,28 @@ simplify (Plus q1 q2) =
 runIncremental :: (Monoid a) => [r] -> Query r a -> r -> a
 runIncremental rows query delta = foldQuery rows (derivative delta query)
 
+data PrimitiveQuery r a where
+  PrimitiveQuery :: [Equality] -> Result r a -> PrimitiveQuery r a
+    deriving (Show, Eq, Ord)
+
+data Equality = Equality
+  deriving (Show, Eq, Ord)
+
+data Result r a where
+  Result :: a -> Result r a
+    deriving (Show, Eq, Ord)
+
+runPrimitiveQuery :: r -> PrimitiveQuery r a -> a
+runPrimitiveQuery delta (PrimitiveQuery equalities result) =
+  evaluateResult delta result
+
+evaluateResult :: r -> Result r a -> a
+evaluateResult = undefined
 
 -- | The results and for each additive clause in the second derivative
 -- an index.
 data Cache r a =
-  Cache a [r]
+  Cache a [Index r a]
     deriving (Show, Eq, Ord)
 
 -- | Semantically (r -> [r])
@@ -189,9 +206,46 @@ data Cache r a =
 -- i.e. f ddx :-> [dx | dx <- rows, f ddx == g dx]
 -- where f and g project the lhs and rhs of the equalities respectively
 data Index r a =
-  Index [Equality] (Map [r] [r])
+  Index (PrimitiveQuery r a) (Map [r] [r])
     deriving (Show, Eq, Ord)
 
+lookupSecondDeltas :: (Ord r) => r -> Index r a -> [r]
+lookupSecondDeltas delta (Index (PrimitiveQuery equalities _) index) =
+  fromMaybe [] (Map.lookup (applyEqualities equalities delta) index)
+
+insertDelta :: (Ord r) => r -> Index r a -> Index r a
+insertDelta delta (Index primitiveQuery@(PrimitiveQuery equalities _) index) =
+  Index primitiveQuery (
+    Map.insertWith (++) (applyEqualities equalities delta) [delta] index)
+
+applyEqualities :: [Equality] -> r -> [r]
+applyEqualities equalities delta =
+  replicate (length equalities) delta
+
+initializeCache :: (Monoid a) => Query r a -> Cache r a
+initializeCache query =
+  Cache mempty indices where
+    indices = [
+      Index (PrimitiveQuery [] (Result mempty)) Map.empty,
+      Index (PrimitiveQuery [] (Result mempty)) Map.empty]
+
+updateCache :: (Ord r, Monoid a) => Query r a -> r -> Cache r a -> Cache r a
+updateCache query delta (Cache result indices) =
+  Cache result' indices' where
+    result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
+    derivativeDelta =
+      foldQuery [] (derivative delta query)
+    secondDerivativeDelta =
+      mconcat (do
+        index <- indices
+        secondDelta <- lookupSecondDeltas delta index
+        let secondDerivativeQuery = derivative secondDelta (derivative delta query)
+            secondDerivativeResult = foldQuery [] secondDerivativeQuery
+        return secondDerivativeResult)
+    indices' = map (insertDelta delta) indices
+
+
+{-
 -- | In our limited language we have only one kind of equality constraint
 type Equality = ()
 
@@ -212,40 +266,7 @@ lookupIndex delta (Index equalities index) =
 insertIndex :: (Ord r, Monoid a) => r -> Index r a -> Index r a
 insertIndex delta (Index equalities index) =
   Index equalities (Map.insertWith (++) (applyEqualitiesRight equalities delta) [delta] index)
-
-
-initializeCache :: (Monoid a) => Query r a -> Cache r a
-initializeCache query =
-  Cache mempty []
-
-initializeIndices :: [[Equality]] -> [Index r a]
-initializeIndices indexSchema =
-  map (\equalities -> Index equalities Map.empty) indexSchema
-
-
--- | A list of queries that each contain only a sequence of 'GuardEqual'
--- followed by a 'Pure'.
-type IndexSchema r a = [Query r a]
-
-indexSchema :: Query r a -> [[Equality]]
-indexSchema _ = [[],[]]
-
-
-updateCache :: (Ord r, Monoid a) => Query r a -> r -> Cache r a -> Cache r a
-updateCache query delta (Cache result rows) =
-  Cache result' rows' where
-    result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
-    derivativeDelta =
-      foldQuery [] (derivative delta query)
-    secondDerivativeDelta =
-      mconcat (do
-        secondDelta <- rows
-        let secondDerivativeQuery = derivative secondDelta (derivative delta query)
-            secondDerivativeResult = foldQuery [] secondDerivativeQuery
-        return secondDerivativeResult)
-    rows' = rows ++ [delta]
-
-
+-}
 {-
 main :: IO ()
 main = do
