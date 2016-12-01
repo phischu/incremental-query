@@ -22,44 +22,27 @@ import GHC.Generics (
   Generic)
 
 
-main :: IO ()
-main = do
-  printQuery cross
-  printQuery (derivative "d" cross)
-  printQuery (derivative "dd" (derivative "d" cross))
-  putStrLn ""
-  print (initializeCache 2 [1] cross)
-  print (updateCache 1 (initializeCache 2 [1] cross))
-  print (initializeCache 2 [1,2] cross)
-  print (updateCache 2 (updateCache 1 (initializeCache 2 [1,2] cross)))
-  putStrLn ""
-  print (initializeCache 1 [1,2] condition)
-  print (updateCache 2 (initializeCache 1 [1,2] condition))
-  print (updateCache 1 (initializeCache 1 [1,2] condition))
-  putStrLn ""
-  print (initializeCache 2 salesDomain sales)
-  print (updateCache (LineItem 0 20) (updateCache (LineItem 0 10) (updateCache (Order 0 1) (initializeCache 2 salesDomain sales))))
-
-cross :: Query v [(v, v)]
+cross :: Query r (r, r)
 cross = do
   x <- db
   y <- db
-  return [(x, y)]
+  return (x, y)
 
 
-condition :: Query Int (Sum Int)
+condition :: (Num r) => Query r r
 condition = do
   x <- db
-  guard (x == 1)
-  return (Sum x)
+  guardEqual x 1
+  return x
 
+{-
 sales :: Query Row (Sum Int)
 sales = do
   Order orderKey orderExchange <- db
   LineItem lineItemKey lineItemPrice <- db
   guard (orderKey == lineItemKey)
   return (Sum (lineItemPrice * orderExchange))
-
+-}
 salesDomain :: [Row]
 salesDomain = [
   Order 0 1,
@@ -78,11 +61,6 @@ type Key = Int
 type Exchange = Int
 type Price = Int
 
-
-type Query v = FreerMonadPlus (Database v)
-
-db :: Query v v
-db = Bind Database Pure
 
 
 data FreerMonadPlus f a where
@@ -115,26 +93,43 @@ instance Alternative (FreerMonadPlus f) where
   (<|>) = mplus
 
 
-data Database v a where
-  Database :: Database v v
+type Query r a = FreerMonadPlus (Database r) a
 
-runQuery :: [v] -> Query v a -> [a]
+data Database r a where
+  Database :: Database r r
+  GuardEqual :: r -> r -> Database r a
+
+data E r where
+  Variable :: String -> E r
+  Value :: r -> E r
+  Pair :: E r -> E r -> E (r, r)
+
+unE :: E r -> r
+unE = undefined
+
+db :: Query r r
+db = Bind Database Pure
+
+guardEqual :: r -> r -> Query r ()
+guardEqual x y = Bind (GuardEqual x y) Pure
+
+runQuery :: [r] -> Query r a -> [a]
 runQuery rows = foldQuery rows . fmap (:[])
 
-foldQuery :: (Monoid a) => [v] -> Query v a -> a
+foldQuery :: (Monoid a) => [r] -> Query r a -> a
 foldQuery rows (Pure a) = a
 foldQuery rows (Bind Database k) = mconcat (map (foldQuery rows . k) rows)
 foldQuery _    (Zero) = mempty
 foldQuery rows (Plus q1 q2) = mappend (foldQuery rows q1) (foldQuery rows q2)
 
 
-derivative :: v -> Query v a -> Query v a
+derivative :: r -> Query r a -> Query r a
 derivative _ (Pure _) =
   mzero
-derivative d (Bind Database k) = msum [
-  pure d >>= k,
-  db >>= derivative d . k,
-  pure d >>= derivative d . k]
+derivative row (Bind Database k) = msum [
+  pure row >>= k,
+  db >>= derivative row . k,
+  pure row >>= derivative row . k]
 derivative _ (Zero) =
   mzero
 derivative d (Plus q1 q2) = msum [
@@ -147,14 +142,14 @@ type Variable = String
 variables :: [Variable]
 variables = ["x", "y", "z"]
 
-printQuery :: (Show a) => Query Variable a -> IO ()
+printQuery :: (Show a) => Query (E r) a -> IO ()
 printQuery = putStrLn . showQuery variables . simplify
 
-showQuery :: (Show a) => [Variable] -> Query Variable a -> String
+showQuery :: (Show a) => [Variable] -> Query (E r) a -> String
 showQuery _ (Pure a) =
-  "pure " ++ show a
+  "pure " ++ (show a)
 showQuery (v : vs) (Bind Database k) =
-  "db >>= (\\" ++ v ++ " -> " ++ showQuery vs (k v)++ ")"
+  "db >>= (\\" ++ v ++ " -> " ++ showQuery vs (k (Variable v))++ ")"
 showQuery _ (Zero) =
   "mzero"
 showQuery vs (Plus q1 q2) =
@@ -177,8 +172,98 @@ simplify (Plus q1 q2) =
     (_, Zero) -> simplify q1
     _ -> Plus (simplify q1) (simplify q2)
 
-runIncremental :: (Monoid a) => [v] -> Query v a -> v -> a
+runIncremental :: (Monoid a) => [r] -> Query r a -> r -> a
 runIncremental rows query delta = foldQuery rows (derivative delta query)
+
+
+-- | The results and for each additive clause in the second derivative
+-- an index.
+data Cache r a =
+  Cache a [r]
+    deriving (Show, Eq, Ord)
+
+-- | Semantically (r -> [r])
+-- Given a row we return exactly the list of rows for which the second derivative
+-- is non-zero.
+-- i.e. f ddx :-> [dx | dx <- rows, derivative ddx (derivative dx query) /= mzero]
+-- i.e. f ddx :-> [dx | dx <- rows, f ddx == g dx]
+-- where f and g project the lhs and rhs of the equalities respectively
+data Index r a =
+  Index [Equality] (Map [r] [r])
+    deriving (Show, Eq, Ord)
+
+-- | In our limited language we have only one kind of equality constraint
+type Equality = ()
+
+applyEqualitiesLeft :: [Equality] -> r -> [r]
+applyEqualitiesLeft equalities r =
+  replicate (length equalities) r
+
+applyEqualitiesRight :: [Equality] -> r -> [r]
+applyEqualitiesRight equalities r =
+  replicate (length equalities) r
+
+
+
+lookupIndex :: (Ord r, Monoid a) => r -> Index r a -> [r]
+lookupIndex delta (Index equalities index) =
+  fromMaybe [] (Map.lookup (applyEqualitiesLeft equalities delta) index)
+
+insertIndex :: (Ord r, Monoid a) => r -> Index r a -> Index r a
+insertIndex delta (Index equalities index) =
+  Index equalities (Map.insertWith (++) (applyEqualitiesRight equalities delta) [delta] index)
+
+
+initializeCache :: (Monoid a) => Query r a -> Cache r a
+initializeCache query =
+  Cache mempty []
+
+initializeIndices :: [[Equality]] -> [Index r a]
+initializeIndices indexSchema =
+  map (\equalities -> Index equalities Map.empty) indexSchema
+
+
+-- | A list of queries that each contain only a sequence of 'GuardEqual'
+-- followed by a 'Pure'.
+type IndexSchema r a = [Query r a]
+
+indexSchema :: Query r a -> [[Equality]]
+indexSchema _ = [[],[]]
+
+
+updateCache :: (Ord r, Monoid a) => Query r a -> r -> Cache r a -> Cache r a
+updateCache query delta (Cache result rows) =
+  Cache result' rows' where
+    result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
+    derivativeDelta =
+      foldQuery [] (derivative delta query)
+    secondDerivativeDelta =
+      mconcat (do
+        secondDelta <- rows
+        let secondDerivativeQuery = derivative secondDelta (derivative delta query)
+            secondDerivativeResult = foldQuery [] secondDerivativeQuery
+        return secondDerivativeResult)
+    rows' = rows ++ [delta]
+
+
+{-
+main :: IO ()
+main = do
+  printQuery cross
+  printQuery (derivative "d" cross)
+  printQuery (derivative "dd" (derivative "d" cross))
+  putStrLn ""
+  print (initializeCache 2 [1] cross)
+  print (updateCache 1 (initializeCache 2 [1] cross))
+  print (initializeCache 2 [1,2] cross)
+  print (updateCache 2 (updateCache 1 (initializeCache 2 [1,2] cross)))
+  putStrLn ""
+  print (initializeCache 1 [1,2] condition)
+  print (updateCache 2 (initializeCache 1 [1,2] condition))
+  print (updateCache 1 (initializeCache 1 [1,2] condition))
+  putStrLn ""
+  print (initializeCache 2 salesDomain sales)
+  print (updateCache (LineItem 0 20) (updateCache (LineItem 0 10) (updateCache (Order 0 1) (initializeCache 2 salesDomain sales))))
 
 data Cache v a = Cache a (Map v (Cache v a))
   deriving (Show, Generic)
@@ -288,7 +373,7 @@ insertCache2 rows delta query (Cache2 result derivativeCache secondDerivativesCa
           secondDerivativeResult =
             foldQuery rows secondDerivativeQuery
       return (row, Map.singleton delta secondDerivativeResult)))
-
+-}
 {-
 newtype Ring r a = Ring { runRing :: [(r, a)] }
   deriving (Show)
