@@ -190,13 +190,17 @@ runPrimitiveQuery :: r -> PrimitiveQuery r a -> a
 runPrimitiveQuery delta (PrimitiveQuery equalities result) =
   evaluateResult delta result
 
+
 evaluateResult :: r -> Result r a -> a
-evaluateResult = undefined
+evaluateResult delta (Result a) = a
+
+evaluateResult2 :: r -> r -> Result r a -> a
+evaluateResult2 delta secondDelta (Result a) = a
 
 -- | The results and for each additive clause in the second derivative
 -- an index.
 data Cache r a =
-  Cache a [Index r a]
+  Cache a (PrimitiveQuery r a) [Summand r a]
     deriving (Show, Eq, Ord)
 
 -- | Semantically (r -> [r])
@@ -205,17 +209,17 @@ data Cache r a =
 -- i.e. f ddx :-> [dx | dx <- rows, derivative ddx (derivative dx query) /= mzero]
 -- i.e. f ddx :-> [dx | dx <- rows, f ddx == g dx]
 -- where f and g project the lhs and rhs of the equalities respectively
-data Index r a =
-  Index (PrimitiveQuery r a) (Map [r] [r])
+data Summand r a =
+  Summand (PrimitiveQuery r a) (Map [r] [r])
     deriving (Show, Eq, Ord)
 
-lookupSecondDeltas :: (Ord r) => r -> Index r a -> [r]
-lookupSecondDeltas delta (Index (PrimitiveQuery equalities _) index) =
+lookupSecondDeltas :: (Ord r) => [Equality] -> r -> Map [r] [r] -> [r]
+lookupSecondDeltas equalities delta index =
   fromMaybe [] (Map.lookup (applyEqualities equalities delta) index)
 
-insertDelta :: (Ord r) => r -> Index r a -> Index r a
-insertDelta delta (Index primitiveQuery@(PrimitiveQuery equalities _) index) =
-  Index primitiveQuery (
+insertDelta :: (Ord r) => r -> Summand r a -> Summand r a
+insertDelta delta (Summand primitiveQuery@(PrimitiveQuery equalities _) index) =
+  Summand primitiveQuery (
     Map.insertWith (++) (applyEqualities equalities delta) [delta] index)
 
 applyEqualities :: [Equality] -> r -> [r]
@@ -224,24 +228,22 @@ applyEqualities equalities delta =
 
 initializeCache :: (Monoid a) => Query r a -> Cache r a
 initializeCache query =
-  Cache mempty indices where
+  Cache mempty (PrimitiveQuery [] (Result mempty)) indices where
     indices = [
-      Index (PrimitiveQuery [] (Result mempty)) Map.empty,
-      Index (PrimitiveQuery [] (Result mempty)) Map.empty]
+      Summand (PrimitiveQuery [] (Result mempty)) Map.empty,
+      Summand (PrimitiveQuery [] (Result mempty)) Map.empty]
 
-updateCache :: (Ord r, Monoid a) => Query r a -> r -> Cache r a -> Cache r a
-updateCache query delta (Cache result indices) =
-  Cache result' indices' where
+updateCache :: (Ord r, Monoid a) => r -> Cache r a -> Cache r a
+updateCache delta (Cache result derivativeQuery indices) =
+  Cache result' derivativeQuery indices' where
     result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
     derivativeDelta =
-      foldQuery [] (derivative delta query)
+      runPrimitiveQuery delta derivativeQuery
     secondDerivativeDelta =
       mconcat (do
-        index <- indices
-        secondDelta <- lookupSecondDeltas delta index
-        let secondDerivativeQuery = derivative secondDelta (derivative delta query)
-            secondDerivativeResult = foldQuery [] secondDerivativeQuery
-        return secondDerivativeResult)
+        Summand (PrimitiveQuery equalities result) index <- indices
+        secondDelta <- lookupSecondDeltas equalities delta index
+        return (evaluateResult2 delta secondDelta result))
     indices' = map (insertDelta delta) indices
 
 
@@ -259,13 +261,13 @@ applyEqualitiesRight equalities r =
 
 
 
-lookupIndex :: (Ord r, Monoid a) => r -> Index r a -> [r]
-lookupIndex delta (Index equalities index) =
+lookupIndex :: (Ord r, Monoid a) => r -> Summand r a -> [r]
+lookupIndex delta (Summand equalities index) =
   fromMaybe [] (Map.lookup (applyEqualitiesLeft equalities delta) index)
 
-insertIndex :: (Ord r, Monoid a) => r -> Index r a -> Index r a
-insertIndex delta (Index equalities index) =
-  Index equalities (Map.insertWith (++) (applyEqualitiesRight equalities delta) [delta] index)
+insertIndex :: (Ord r, Monoid a) => r -> Summand r a -> Summand r a
+insertIndex delta (Summand equalities index) =
+  Summand equalities (Map.insertWith (++) (applyEqualitiesRight equalities delta) [delta] index)
 -}
 {-
 main :: IO ()
