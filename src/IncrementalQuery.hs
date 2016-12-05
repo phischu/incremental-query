@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes, DeriveGeneric #-}
+{-# LANGUAGE GADTs, TypeSynonymInstances, FlexibleInstances, RankNTypes, DeriveGeneric, StandaloneDeriving #-}
 module IncrementalQuery where
 
 
@@ -176,43 +176,50 @@ runIncremental :: (Monoid a) => [r] -> Query r a -> r -> a
 runIncremental rows query delta = foldQuery rows (derivative delta query)
 
 data PrimitiveQuery r a where
-  PrimitiveQuery :: [Equality] -> Result r a -> PrimitiveQuery r a
-    deriving (Show, Eq, Ord)
+  PrimitiveQuery :: [Clause r a] -> PrimitiveQuery r a
+    deriving (Show, Eq)
+
+-- | An additive clause.
+data Clause r a where
+  Clause :: [Equality] -> Result r a -> Clause r a
+    deriving (Show, Eq)
 
 data Equality = Equality
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq)
 
 data Result r a where
-  Result :: a -> Result r a
-    deriving (Show, Eq, Ord)
+  Delta :: Result r r
+  SecondDelta :: Result r r
+  ResultPair :: Result r a -> Result r b -> Result r (a, b)
+  ResultList :: Result r a -> Result r [a]
 
-runPrimitiveQuery :: r -> PrimitiveQuery r a -> a
-runPrimitiveQuery delta (PrimitiveQuery equalities result) =
-  evaluateResult delta result
+deriving instance Show (Result r a)
+deriving instance Eq (Result r a)
 
+runPrimitiveQuery :: (Monoid a) => [r] -> PrimitiveQuery r a -> a
+runPrimitiveQuery deltas (PrimitiveQuery clauses) =
+  mconcat (map (evaluateClause deltas) clauses)
 
-evaluateResult :: r -> Result r a -> a
-evaluateResult delta (Result a) = a
+evaluateClause :: [r] -> Clause r a -> a
+evaluateClause deltas (Clause _ result) =
+  evaluateResult deltas result
 
-evaluateResult2 :: r -> r -> Result r a -> a
-evaluateResult2 delta secondDelta (Result a) = a
+evaluateResult :: [r] -> Result r a -> a
+evaluateResult (delta : _) Delta =
+  delta
+evaluateResult (_ : secondDelta : _) SecondDelta =
+  secondDelta
+evaluateResult deltas (ResultPair result1 result2) =
+  (evaluateResult deltas result1, evaluateResult deltas result2)
+evaluateResult deltas (ResultList result) =
+  [evaluateResult deltas result]
 
--- | The results and for each additive clause in the second derivative
--- an index.
+-- | The result, the first derivative, the second derivative and the entire database.
 data Cache r a =
-  Cache a (PrimitiveQuery r a) [Summand r a]
-    deriving (Show, Eq, Ord)
+  Cache a (PrimitiveQuery r a) (PrimitiveQuery r a) [r]
+    deriving (Show, Eq)
 
--- | Semantically (r -> [r])
--- Given a row we return exactly the list of rows for which the second derivative
--- is non-zero.
--- i.e. f ddx :-> [dx | dx <- rows, derivative ddx (derivative dx query) /= mzero]
--- i.e. f ddx :-> [dx | dx <- rows, f ddx == g dx]
--- where f and g project the lhs and rhs of the equalities respectively
-data Summand r a =
-  Summand (PrimitiveQuery r a) (Map [r] [r])
-    deriving (Show, Eq, Ord)
-
+{-
 lookupSecondDeltas :: (Ord r) => [Equality] -> r -> Map [r] [r] -> [r]
 lookupSecondDeltas equalities delta index =
   fromMaybe [] (Map.lookup (applyEqualities equalities delta) index)
@@ -225,26 +232,25 @@ insertDelta delta (Summand primitiveQuery@(PrimitiveQuery equalities _) index) =
 applyEqualities :: [Equality] -> r -> [r]
 applyEqualities equalities delta =
   replicate (length equalities) delta
+-}
 
 initializeCache :: (Monoid a) => Query r a -> Cache r a
 initializeCache query =
-  Cache mempty (PrimitiveQuery [] (Result mempty)) indices where
-    indices = [
-      Summand (PrimitiveQuery [] (Result mempty)) Map.empty,
-      Summand (PrimitiveQuery [] (Result mempty)) Map.empty]
+  Cache mempty derivativeQuery secondDerivativeQuery [] where
+    derivativeQuery = undefined
+    secondDerivativeQuery = undefined
 
 updateCache :: (Ord r, Monoid a) => r -> Cache r a -> Cache r a
-updateCache delta (Cache result derivativeQuery indices) =
-  Cache result' derivativeQuery indices' where
+updateCache delta (Cache result derivativeQuery secondDerivativeQuery rows) =
+  Cache result' derivativeQuery secondDerivativeQuery rows' where
     result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
     derivativeDelta =
-      runPrimitiveQuery delta derivativeQuery
+      runPrimitiveQuery [delta] derivativeQuery
     secondDerivativeDelta =
       mconcat (do
-        Summand (PrimitiveQuery equalities result) index <- indices
-        secondDelta <- lookupSecondDeltas equalities delta index
-        return (evaluateResult2 delta secondDelta result))
-    indices' = map (insertDelta delta) indices
+        secondDelta <- rows
+        return (runPrimitiveQuery [delta, secondDelta] secondDerivativeQuery))
+    rows' = rows ++ [delta]
 
 
 {-
