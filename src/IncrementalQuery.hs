@@ -165,10 +165,10 @@ showQuery vs (Plus q1 q2) =
 simplify :: Query v a -> Query v a
 simplify (Pure a) =
   Pure a
-simplify (Bind Database k) =
+simplify (Bind c k) =
   case simplify (k undefined) of
     Zero -> Zero
-    _ -> Bind Database (simplify . k)
+    _ -> Bind c (simplify . k)
 simplify Zero =
   Zero
 simplify (Plus q1 q2) =
