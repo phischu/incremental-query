@@ -24,22 +24,23 @@ import GHC.Generics (
 
 cross :: Query r (r, r)
 cross = do
-  x <- db
-  y <- db
+  x <- database
+  y <- database
   return (x, y)
 
 
-condition :: (Num r) => Query r r
+condition :: Query r r
 condition = do
-  x <- db
-  guardEqual x 1
+  x <- database
+  y <- database
+  guardEqual x y
   return x
 
 {-
 sales :: Query Row (Sum Int)
 sales = do
-  Order orderKey orderExchange <- db
-  LineItem lineItemKey lineItemPrice <- db
+  Order orderKey orderExchange <- database
+  LineItem lineItemKey lineItemPrice <- database
   guard (orderKey == lineItemKey)
   return (Sum (lineItemPrice * orderExchange))
 -}
@@ -97,18 +98,10 @@ type Query r a = FreerMonadPlus (Database r) a
 
 data Database r a where
   Database :: Database r r
-  GuardEqual :: r -> r -> Database r a
+  GuardEqual :: r -> r -> Database r ()
 
-data E r where
-  Variable :: String -> E r
-  Value :: r -> E r
-  Pair :: E r -> E r -> E (r, r)
-
-unE :: E r -> r
-unE = undefined
-
-db :: Query r r
-db = Bind Database Pure
+database :: Query r r
+database = Bind Database Pure
 
 guardEqual :: r -> r -> Query r ()
 guardEqual x y = Bind (GuardEqual x y) Pure
@@ -128,7 +121,7 @@ derivative _ (Pure _) =
   mzero
 derivative row (Bind Database k) = msum [
   pure row >>= k,
-  db >>= derivative row . k,
+  database >>= derivative row . k,
   pure row >>= derivative row . k]
 derivative _ (Zero) =
   mzero
@@ -136,20 +129,31 @@ derivative d (Plus q1 q2) = msum [
   derivative d q1,
   derivative d q2]
 
+runIncremental :: (Monoid a) => [r] -> Query r a -> r -> a
+runIncremental rows query delta = foldQuery rows (derivative delta query)
+
 
 type Variable = String
 
 variables :: [Variable]
 variables = ["x", "y", "z"]
 
-printQuery :: (Show a) => Query (E r) a -> IO ()
+data Expression v a where
+  Variable :: Variable -> Expression v v
+  Pair :: (Expression v b, Expression v c) -> Expression v (b, c)
+  List :: [Expression v b] -> Expression v [b]
+
+deriving instance Show (Expression v a)
+deriving instance Eq (Expression v a)
+
+printQuery :: (Show a) => Query (Expression Variable Variable) a -> IO ()
 printQuery = putStrLn . showQuery variables . simplify
 
-showQuery :: (Show a) => [Variable] -> Query (E r) a -> String
+showQuery :: (Show a) => [Variable] -> Query (Expression Variable Variable) a -> String
 showQuery _ (Pure a) =
   "pure " ++ (show a)
 showQuery (v : vs) (Bind Database k) =
-  "db >>= (\\" ++ v ++ " -> " ++ showQuery vs (k (Variable v))++ ")"
+  "database >>= (\\" ++ v ++ " -> " ++ showQuery vs (k (Variable v))++ ")"
 showQuery _ (Zero) =
   "mzero"
 showQuery vs (Plus q1 q2) =
@@ -172,85 +176,74 @@ simplify (Plus q1 q2) =
     (_, Zero) -> simplify q1
     _ -> Plus (simplify q1) (simplify q2)
 
-runIncremental :: (Monoid a) => [r] -> Query r a -> r -> a
-runIncremental rows query delta = foldQuery rows (derivative delta query)
 
-data PrimitiveQuery r a where
-  PrimitiveQuery :: [Clause r a] -> PrimitiveQuery r a
-    deriving (Show, Eq)
+-- | The current value, the first derivative, the second derivative and
+-- all rows.
+-- TODO use index instead
+data Cache r a = Cache a [Clause r a] [Clause r a] [r]
+  deriving (Show, Eq)
+
+initializeCache :: (Monoid a) => Query (Expression r r) (Expression r a) -> Cache r a
+initializeCache query =
+  Cache mempty derivativeClauses secondDerivativeClauses [] where
+    derivativeClauses =
+      queryClauses (derivative (Variable "dx") query)
+    secondDerivativeClauses =
+      queryClauses (derivative (Variable "ddx") (derivative (Variable "dx") query))
+
+updateCache :: (Monoid a) => r -> Cache r a -> Cache r a
+updateCache row (Cache result derivativeClauses secondDerivativeClauses rows) =
+  Cache result' derivativeClauses secondDerivativeClauses rows' where
+    result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
+    derivativeDelta =
+      mconcat (runClauses [row] derivativeClauses)
+    secondDerivativeDelta =
+      mconcat (do
+        row2 <- rows
+        return (mconcat (runClauses [row, row2] secondDerivativeClauses)))
+    rows' = rows ++ [row]
 
 -- | An additive clause.
 data Clause r a where
-  Clause :: [Equality] -> Result r a -> Clause r a
+  Clause :: [Equality r a] -> Expression r a -> Clause r a
     deriving (Show, Eq)
 
-data Equality = Equality
+-- TODO Existentially hide parameter a
+data Equality r a = Equality (Expression r r) (Expression r r)
   deriving (Show, Eq)
 
-data Result r a where
-  Delta :: Result r r
-  SecondDelta :: Result r r
-  ResultPair :: Result r a -> Result r b -> Result r (a, b)
-  ResultList :: Result r a -> Result r [a]
+runClauses :: [r] -> [Clause r a] -> [a]
+runClauses deltas clauses = map (runClause deltas) clauses
 
-deriving instance Show (Result r a)
-deriving instance Eq (Result r a)
+-- TODO use equalities
+runClause :: [r] -> Clause r a -> a
+runClause ds (Clause _ e) =
+  evaluateExpression ds e
 
-runPrimitiveQuery :: (Monoid a) => [r] -> PrimitiveQuery r a -> a
-runPrimitiveQuery deltas (PrimitiveQuery clauses) =
-  mconcat (map (evaluateClause deltas) clauses)
+evaluateExpression :: [r] -> Expression r a -> a
+evaluateExpression (dx : _) (Variable "dx") =
+  dx
+evaluateExpression (_ : ddx : _) (Variable "ddx") =
+  ddx
+evaluateExpression ds (Pair (e1, e2)) =
+  (evaluateExpression ds e1, evaluateExpression ds e2)
+evaluateExpression ds (List es) =
+  map (evaluateExpression ds) es
 
-evaluateClause :: [r] -> Clause r a -> a
-evaluateClause deltas (Clause _ result) =
-  evaluateResult deltas result
+queryClauses :: Query (Expression r r) (Expression r a) -> [Clause r a]
+queryClauses (Pure e) =
+  [Clause [] e]
+queryClauses (Bind Database k) =
+  []
+queryClauses (Bind (GuardEqual e1 e2) k) = do
+  Clause equalities result <- queryClauses (k ())
+  return (Clause (Equality e1 e2 : equalities) result)
+queryClauses Zero =
+  []
+queryClauses (Plus q1 q2) =
+  queryClauses q1 ++ queryClauses q2
 
-evaluateResult :: [r] -> Result r a -> a
-evaluateResult (delta : _) Delta =
-  delta
-evaluateResult (_ : secondDelta : _) SecondDelta =
-  secondDelta
-evaluateResult deltas (ResultPair result1 result2) =
-  (evaluateResult deltas result1, evaluateResult deltas result2)
-evaluateResult deltas (ResultList result) =
-  [evaluateResult deltas result]
 
--- | The result, the first derivative, the second derivative and the entire database.
-data Cache r a =
-  Cache a (PrimitiveQuery r a) (PrimitiveQuery r a) [r]
-    deriving (Show, Eq)
-
-{-
-lookupSecondDeltas :: (Ord r) => [Equality] -> r -> Map [r] [r] -> [r]
-lookupSecondDeltas equalities delta index =
-  fromMaybe [] (Map.lookup (applyEqualities equalities delta) index)
-
-insertDelta :: (Ord r) => r -> Summand r a -> Summand r a
-insertDelta delta (Summand primitiveQuery@(PrimitiveQuery equalities _) index) =
-  Summand primitiveQuery (
-    Map.insertWith (++) (applyEqualities equalities delta) [delta] index)
-
-applyEqualities :: [Equality] -> r -> [r]
-applyEqualities equalities delta =
-  replicate (length equalities) delta
--}
-
-initializeCache :: (Monoid a) => Query r a -> Cache r a
-initializeCache query =
-  Cache mempty derivativeQuery secondDerivativeQuery [] where
-    derivativeQuery = undefined
-    secondDerivativeQuery = undefined
-
-updateCache :: (Ord r, Monoid a) => r -> Cache r a -> Cache r a
-updateCache delta (Cache result derivativeQuery secondDerivativeQuery rows) =
-  Cache result' derivativeQuery secondDerivativeQuery rows' where
-    result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
-    derivativeDelta =
-      runPrimitiveQuery [delta] derivativeQuery
-    secondDerivativeDelta =
-      mconcat (do
-        secondDelta <- rows
-        return (runPrimitiveQuery [delta, secondDelta] secondDerivativeQuery))
-    rows' = rows ++ [delta]
 
 
 {-
