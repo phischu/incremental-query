@@ -123,6 +123,8 @@ derivative row (Bind Database k) = msum [
   pure row >>= k,
   database >>= derivative row . k,
   pure row >>= derivative row . k]
+derivative row (Bind (GuardEqual e1 e2) k) =
+  guardEqual e1 e2 >>= derivative row . k
 derivative _ (Zero) =
   mzero
 derivative d (Plus q1 q2) = msum [
@@ -191,16 +193,16 @@ initializeCache query =
     secondDerivativeClauses =
       queryClauses (derivative (Variable "ddx") (derivative (Variable "dx") query))
 
-updateCache :: (Monoid a) => r -> Cache r a -> Cache r a
+updateCache :: (Eq r, Monoid a) => r -> Cache r a -> Cache r a
 updateCache row (Cache result derivativeClauses secondDerivativeClauses rows) =
   Cache result' derivativeClauses secondDerivativeClauses rows' where
     result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
     derivativeDelta =
-      mconcat (runClauses [row] derivativeClauses)
+      runClauses [row] derivativeClauses
     secondDerivativeDelta =
       mconcat (do
         row2 <- rows
-        return (mconcat (runClauses [row, row2] secondDerivativeClauses)))
+        return (runClauses [row, row2] secondDerivativeClauses))
     rows' = rows ++ [row]
 
 -- | An additive clause.
@@ -212,13 +214,22 @@ data Clause r a where
 data Equality r a = Equality (Expression r r) (Expression r r)
   deriving (Show, Eq)
 
-runClauses :: [r] -> [Clause r a] -> [a]
-runClauses deltas clauses = map (runClause deltas) clauses
+runClauses :: (Eq r, Monoid a) => [r] -> [Clause r a] -> a
+runClauses deltas clauses = mconcat (map (runClause deltas) clauses)
 
--- TODO use equalities
-runClause :: [r] -> Clause r a -> a
-runClause ds (Clause _ e) =
-  evaluateExpression ds e
+runClause :: (Eq r, Monoid a) => [r] -> Clause r a -> a
+runClause deltas (Clause equalities expression) =
+  case evaluateEqualities deltas equalities of
+    False -> mempty
+    True -> evaluateExpression deltas expression
+
+evaluateEqualities :: (Eq r) => [r] -> [Equality r a] -> Bool
+evaluateEqualities deltas equalities =
+  all (evaluateEquality deltas) equalities
+
+evaluateEquality :: (Eq r) => [r] -> Equality r a -> Bool
+evaluateEquality deltas (Equality expression1 expression2) =
+  evaluateExpression deltas expression1 == evaluateExpression deltas expression2
 
 evaluateExpression :: [r] -> Expression r a -> a
 evaluateExpression (dx : _) (Variable "dx") =
