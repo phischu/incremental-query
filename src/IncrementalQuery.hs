@@ -6,7 +6,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe, fromJust)
+import Data.Maybe (fromMaybe, fromJust, mapMaybe)
 import Data.List (intercalate)
 import Data.Hashable (hash)
 import Control.Applicative (
@@ -180,30 +180,36 @@ simplify (Plus q1 q2) =
 
 
 -- | The current value, the first derivative, the second derivative and
--- all rows.
--- TODO use index instead
-data Cache r a = Cache a [Clause r a] [Clause r a] [r]
+-- an Index. The index is used to look up rows for which the second derivative
+-- is not zero.
+data Cache r a = Cache a [Clause r a] [Clause r a] [Index r]
   deriving (Show, Eq)
 
+-- XXX Initialize result to query on empty database
 initializeCache :: (Monoid a) => Query (Expression r r) (Expression r a) -> Cache r a
 initializeCache query =
-  Cache mempty derivativeClauses secondDerivativeClauses [] where
+  Cache mempty derivativeClauses secondDerivativeClauses indexes where
     derivativeClauses =
       queryClauses (derivative (Variable "dx") query)
     secondDerivativeClauses =
       queryClauses (derivative (Variable "ddx") (derivative (Variable "dx") query))
+    indexes =
+      replicate (length secondDerivativeClauses) emptyIndex
 
-updateCache :: (Eq r, Monoid a) => r -> Cache r a -> Cache r a
-updateCache row (Cache result derivativeClauses secondDerivativeClauses rows) =
-  Cache result' derivativeClauses secondDerivativeClauses rows' where
+updateCache :: (Ord r, Monoid a) => r -> Cache r a -> Cache r a
+updateCache row (Cache result derivativeClauses secondDerivativeClauses indexes) =
+  Cache result' derivativeClauses secondDerivativeClauses indexes' where
     result' = mappend result (mappend derivativeDelta secondDerivativeDelta)
     derivativeDelta =
       runClauses [row] derivativeClauses
     secondDerivativeDelta =
       mconcat (do
-        row2 <- rows
-        return (runClauses [row, row2] secondDerivativeClauses))
-    rows' = rows ++ [row]
+        (secondDerivativeClause, index) <- zip secondDerivativeClauses indexes
+        return (mconcat (do
+          row2 <- lookupIndex secondDerivativeClause row index
+          return (runClause [row, row2] secondDerivativeClause))))
+    indexes' =
+      zipWith (\clause -> insertIndex clause row) secondDerivativeClauses indexes
 
 -- | An additive clause.
 data Clause r a where
@@ -254,6 +260,33 @@ queryClauses Zero =
 queryClauses (Plus q1 q2) =
   queryClauses q1 ++ queryClauses q2
 
+
+type Index r = Map [r] [r]
+
+emptyIndex :: Index r
+emptyIndex = Map.empty
+
+lookupIndex :: (Ord r) => Clause r a -> r -> Index r -> [r]
+lookupIndex (Clause equalities _) row index =
+  fromMaybe [] (Map.lookup (equalitiesKey row equalities) index)
+
+insertIndex :: (Ord r) => Clause r a -> r -> Index r -> Index r
+insertIndex (Clause equalities _) row2 index =
+  Map.insertWith (++) (equalitiesKey row2 equalities) [row2] index
+
+equalitiesKey :: r -> [Equality r a] -> [r]
+equalitiesKey row = mapMaybe (equalityKey row)
+
+-- TODO different function for lookup and insertion
+equalityKey :: r -> Equality r a -> Maybe r
+equalityKey row (Equality (Variable "dx") (Variable "dx")) =
+  Nothing
+equalityKey row (Equality (Variable "dx") (Variable "ddx")) =
+  Just row
+equalityKey row (Equality (Variable "ddx") (Variable "dx")) =
+  Just row
+equalityKey row (Equality (Variable "ddx") (Variable "ddx")) =
+  Nothing
 
 
 

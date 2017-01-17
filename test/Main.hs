@@ -10,7 +10,7 @@ import Test.Hspec (
   hspec, describe, it, shouldBe)
 
 import qualified Data.Map as Map (
-  fromList)
+  fromList, empty)
 
 main :: IO ()
 main = hspec (do
@@ -26,10 +26,10 @@ main = hspec (do
         initialCache = initializeCache cross
 
         updatedCache :: Cache Int [(Int, Int)]
-        updatedCache = Cache [(1,1)] derivativeClauses secondDerivativeClauses [1]
+        updatedCache = Cache [(1,1)] derivativeClauses secondDerivativeClauses [Map.fromList [([],[1])], Map.fromList [([],[1])]]
 
         updatedCache2 :: Cache Int [(Int, Int)]
-        updatedCache2 = Cache [(1,1), (2,2), (2,1), (1,2)] derivativeClauses secondDerivativeClauses [1,2]
+        updatedCache2 = Cache [(1,1), (2,2), (2,1), (1,2)] derivativeClauses secondDerivativeClauses [Map.fromList [([],[2,1])], Map.fromList [([],[2,1])]]
 
         derivativeClauses :: [Clause r [(r,r)]]
         derivativeClauses = [
@@ -40,6 +40,8 @@ main = hspec (do
           Clause [] (List [Pair (Variable "dx", Variable "ddx")]),
           Clause [] (List [Pair (Variable "ddx", Variable "dx")])]
 
+    it "initializes the cache" (
+      initialCache `shouldBe` Cache [] derivativeClauses secondDerivativeClauses [Map.empty, Map.empty])
     it "does the first update" (
       updateCache 1 initialCache `shouldBe` updatedCache)
     it "does the second update" (
@@ -54,11 +56,12 @@ main = hspec (do
           guardEqual x y
           return (List [Pair (x, y)])
 
+        initialCache :: Cache Int [(Int, Int)]
         initialCache = initializeCache condition
 
-        updatedCache = Cache [(1,1)] derivativeClauses secondDerivativeClauses [1]
+        updatedCache = Cache [(1,1)] derivativeClauses secondDerivativeClauses [Map.fromList [([1],[1])], Map.fromList [([1],[1])]]
 
-        updatedCache2 = Cache [(1,1), (2,2)] derivativeClauses secondDerivativeClauses [1,2]
+        updatedCache2 = Cache [(1,1), (2,2)] derivativeClauses secondDerivativeClauses [Map.fromList [([1],[1]),([2],[2])], Map.fromList [([1],[1]),([2],[2])]]
 
         derivativeClauses = [
           Clause
@@ -73,9 +76,10 @@ main = hspec (do
             [Equality (Variable "ddx") (Variable "dx")]
             (List [Pair (Variable "ddx", Variable "dx")])]
 
+    it "initializes the cache" (
+      initialCache `shouldBe` Cache [] derivativeClauses secondDerivativeClauses [Map.empty, Map.empty])
     it "does the first update" (
       updateCache 1 initialCache `shouldBe` updatedCache)
-
     it "does the second update" (
       updateCache 2 updatedCache `shouldBe` updatedCache2)))
 
